@@ -99,6 +99,13 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Controlesommen, zodat een beheerder een download kan vastpinnen op een bekende hash.
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
       # Elk bestand ondertekenen; de app installeert alleen updates met een geldige handtekening.
       # Zonder het secret MINISIGN_SECRET_KEY wordt de release niet ondertekend en slaat de
       # ingebouwde updater hem over.
