@@ -1,0 +1,112 @@
+# Bouwt en test bij elke commit op main, en publiceert het resultaat als GitHub-release.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            asset: Perkament-macOS.zip
+          - name: Windows
+            os: windows-latest
+            asset: Perkament-Windows.zip
+          - name: Linux
+            os: ubuntu-latest
+            asset: Perkament-Linux.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.name == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux dependencies
+        if: matrix.name == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgtk-3-dev
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: echo "version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build and package (macOS, universal)
+        if: matrix.name == 'macOS'
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          lipo -create -output perkament-universal \
+            target/aarch64-apple-darwin/release/perkament \
+            target/x86_64-apple-darwin/release/perkament
+          scripts/bundle-macos.sh perkament-universal "${{ steps.version.outputs.version }}" "${{ matrix.asset }}"
+
+      - name: Build and package (Windows)
+        if: matrix.name == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release --locked
+          Compress-Archive -Path target/release/perkament.exe -DestinationPath "${{ matrix.asset }}"
+
+      - name: Build and package (Linux)
+        if: matrix.name == 'Linux'
+        run: |
+          cargo build --release --locked
+          tar -czf "${{ matrix.asset }}" -C target/release perkament
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_NUMBER: ${{ github.run_number }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          tag="v${version}-build.${RUN_NUMBER}"
+          gh release create "$tag" dist/* \
+            --target "$COMMIT" \
+            --title "Perkament ${version} (build ${RUN_NUMBER})" \
+            --generate-notes \
+            --latest

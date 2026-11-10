@@ -1,0 +1,15 @@
+[package]
+name = "perkament"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+eframe = "0.37"
+hayro = "0.9"
+lopdf = "0.47"
+rfd = "0.18"
+sys-locale = "0.3.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+winit = { version = "0.30", default-features = false }
