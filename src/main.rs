@@ -38,6 +38,19 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
+    // Headless: `perkament --install-update` installeert de nieuwste release, als die nieuwer is.
+    if args.first().map(String::as_str) == Some("--install-update") {
+        match updater::install_latest() {
+            Ok(Some(name)) => println!("{name}: {}", t("upd.ready")),
+            Ok(None) => println!("{}", t("upd.up_to_date")),
+            Err(e) => {
+                eprintln!("{}: {e}", t("err.prefix"));
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     let initial = args.first().map(PathBuf::from);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

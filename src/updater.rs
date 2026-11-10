@@ -199,6 +199,15 @@ fn install(update: &Available) -> Result<(), String> {
     replace(&archive)
 }
 
+/// Controleert en installeert in één keer, zonder venster. Geeft de naam van de
+/// geïnstalleerde release terug, of `None` als er niets nieuwers is.
+pub fn install_latest() -> Result<Option<String>, String> {
+    match check()? {
+        Some(update) => install(&update).map(|()| Some(update.name)),
+        None => Ok(None),
+    }
+}
+
 /// Controleert op de achtergrond. Bij `quiet` wordt alleen een beschikbare update gemeld.
 pub fn spawn_check(tx: Sender<Event>, notify: impl Fn() + Send + 'static, quiet: bool) {
     std::thread::spawn(move || {
