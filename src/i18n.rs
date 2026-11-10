@@ -281,6 +281,26 @@ static STRINGS: &[(&str, [&str; 5])] = &[
     ("err.usage", ["gebruik: perkament --render in.pdf uitvoermap [schaal]", "usage: perkament --render in.pdf output-dir [scale]", "Aufruf: perkament --render in.pdf ausgabeordner [skalierung]", "usage : perkament --render in.pdf dossier-sortie [échelle]", "uso: perkament --render in.pdf carpeta-salida [escala]"]),
     ("err.prefix", ["fout", "error", "Fehler", "erreur", "error"]),
 
+    // Updates
+    ("upd.check", ["Controleren op updates…", "Check for Updates…", "Nach Updates suchen…", "Rechercher des mises à jour…", "Buscar actualizaciones…"]),
+    ("upd.auto", ["Automatisch op updates controleren", "Check for updates automatically", "Automatisch nach Updates suchen", "Rechercher automatiquement les mises à jour", "Buscar actualizaciones automáticamente"]),
+    ("upd.title", ["Update beschikbaar", "Update Available", "Update verfügbar", "Mise à jour disponible", "Actualización disponible"]),
+    ("upd.available", ["{name} is beschikbaar. Je gebruikt nu build {own}.", "{name} is available. You are on build {own}.", "{name} ist verfügbar. Du verwendest Build {own}.", "{name} est disponible. Vous utilisez la build {own}.", "{name} está disponible. Estás usando la compilación {own}."]),
+    ("upd.install", ["Nu bijwerken", "Update Now", "Jetzt aktualisieren", "Mettre à jour", "Actualizar ahora"]),
+    ("btn.later", ["Later", "Later", "Später", "Plus tard", "Más tarde"]),
+    ("upd.downloading", ["Update wordt gedownload en gecontroleerd…", "Downloading and verifying the update…", "Update wird heruntergeladen und geprüft…", "Téléchargement et vérification de la mise à jour…", "Descargando y verificando la actualización…"]),
+    ("upd.ready_title", ["Update geïnstalleerd", "Update Installed", "Update installiert", "Mise à jour installée", "Actualización instalada"]),
+    ("upd.ready", ["De update is geïnstalleerd. Start Perkament opnieuw om hem te gebruiken.", "The update is installed. Restart Perkament to use it.", "Das Update ist installiert. Starte Perkament neu, um es zu verwenden.", "La mise à jour est installée. Redémarrez Perkament pour l'utiliser.", "La actualización está instalada. Reinicia Perkament para usarla."]),
+    ("upd.restart", ["Opnieuw starten", "Restart", "Neu starten", "Redémarrer", "Reiniciar"]),
+    ("upd.up_to_date", ["Je gebruikt de nieuwste versie.", "You are on the latest version.", "Du verwendest die neueste Version.", "Vous utilisez la dernière version.", "Tienes la última versión."]),
+    ("upd.failed", ["Bijwerken mislukt: {e}", "Updating failed: {e}", "Aktualisierung fehlgeschlagen: {e}", "Échec de la mise à jour : {e}", "No se pudo actualizar: {e}"]),
+    ("upd.too_large", ["de download is groter dan verwacht", "the download is larger than expected", "der Download ist größer als erwartet", "le téléchargement est plus volumineux que prévu", "la descarga es mayor de lo esperado"]),
+    ("upd.dev_build", ["dit is een lokale build; updates werken alleen in een officiële release", "this is a local build; updates only work in an official release", "dies ist ein lokaler Build; Updates funktionieren nur in einer offiziellen Version", "ceci est une build locale ; les mises à jour ne fonctionnent que dans une version officielle", "esta es una compilación local; las actualizaciones solo funcionan en una versión oficial"]),
+    ("upd.bad_signature", ["de handtekening van de update klopt niet; er is niets geïnstalleerd", "the update's signature is invalid; nothing was installed", "die Signatur des Updates ist ungültig; es wurde nichts installiert", "la signature de la mise à jour est invalide ; rien n'a été installé", "la firma de la actualización no es válida; no se ha instalado nada"]),
+    ("upd.unsigned", ["deze release is niet ondertekend en wordt daarom niet geïnstalleerd", "this release is not signed and will not be installed", "diese Version ist nicht signiert und wird deshalb nicht installiert", "cette version n'est pas signée et ne sera pas installée", "esta versión no está firmada y no se instalará"]),
+    ("upd.not_bundle", ["de app draait niet vanuit een appbundel en kan zichzelf niet vervangen", "the app is not running from an app bundle and cannot replace itself", "die App läuft nicht aus einem App-Bundle und kann sich nicht selbst ersetzen", "l'application ne s'exécute pas depuis un bundle et ne peut pas se remplacer", "la app no se ejecuta desde un paquete de aplicación y no puede reemplazarse"]),
+    ("upd.bad_archive", ["het releasebestand heeft niet de verwachte inhoud", "the release file does not have the expected contents", "die Release-Datei hat nicht den erwarteten Inhalt", "le fichier de version n'a pas le contenu attendu", "el archivo de la versión no tiene el contenido esperado"]),
+
     // Soorten opmerkingen
     ("annot.highlight", ["Markering", "Highlight", "Markierung", "Surlignage", "Resaltado"]),
     ("annot.square", ["Kader", "Box", "Rahmen", "Cadre", "Recuadro"]),

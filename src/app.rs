@@ -9,6 +9,8 @@ use perkament::render::{self, Kind, PageGeom, Renderer, Response};
 use perkament::textedit::{self, Replaced, TextLine};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use crate::updater;
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 const PAGE_GAP: f32 = 14.0;
@@ -85,6 +87,8 @@ enum After {
     Quit,
     Open(Option<PathBuf>),
     CloseDoc,
+    /// Afsluiten en de bijgewerkte app opnieuw starten.
+    Restart,
 }
 
 enum Dialog {
@@ -97,6 +101,8 @@ enum Dialog {
     Unsaved(After),
     Error(String),
     About,
+    Update(updater::Available),
+    Restart,
 }
 
 enum Drag {
@@ -138,6 +144,9 @@ enum Action {
     FitWidth,
     Proceed(After),
     SaveThen(After),
+    CheckUpdates,
+    InstallUpdate(updater::Available),
+    Restart,
 }
 
 /// Menutekst met de sneltoets erachter, in de notatie van het platform.
@@ -179,12 +188,27 @@ pub struct PerkamentApp {
     title: String,
     force_quit: bool,
     initial: Option<PathBuf>,
+    update_tx: Sender<updater::Event>,
+    update_rx: Receiver<updater::Event>,
+    auto_update: bool,
 }
 
 impl PerkamentApp {
     pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
         let ctx = cc.egui_ctx.clone();
-        let renderer = render::spawn(move || ctx.request_repaint());
+        let renderer = render::spawn({
+            let ctx = ctx.clone();
+            move || ctx.request_repaint()
+        });
+        // Updates: resten van een vorige update opruimen en hooguit eens per dag zelf controleren.
+        let (update_tx, update_rx) = channel();
+        updater::clean_up();
+        let auto_update = crate::settings::auto_update();
+        if auto_update && updater::own_build().is_some() && crate::settings::update_check_due() {
+            crate::settings::mark_update_checked();
+            let ctx = ctx.clone();
+            updater::spawn_check(update_tx.clone(), move || ctx.request_repaint(), true);
+        }
         // De ingebouwde zoom van egui zou anders de hele interface schalen bij Cmd/Ctrl met + en -.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         Self {
@@ -213,6 +237,9 @@ impl PerkamentApp {
             title: String::new(),
             force_quit: false,
             initial,
+            update_tx,
+            update_rx,
+            auto_update,
         }
     }
 
@@ -398,6 +425,11 @@ impl PerkamentApp {
                         self.open_path(&path);
                     }
                 }
+                After::Restart => {
+                    self.force_quit = true;
+                    updater::relaunch();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
                 After::CloseDoc => {
                     self.doc = None;
                     self.status = t("st.closed").into();
@@ -565,6 +597,22 @@ impl PerkamentApp {
                 self.zoom_changed = Instant::now();
             }
             Action::FitWidth => self.fit_width = true,
+            Action::CheckUpdates => {
+                let ctx = ctx.clone();
+                updater::spawn_check(self.update_tx.clone(), move || ctx.request_repaint(), false);
+            }
+            Action::InstallUpdate(update) => {
+                self.status = t("upd.downloading").into();
+                let ctx = ctx.clone();
+                updater::spawn_install(update, self.update_tx.clone(), move || ctx.request_repaint());
+            }
+            Action::Restart => {
+                if dirty {
+                    self.dialog = Some(Dialog::Unsaved(After::Restart));
+                } else {
+                    self.apply(ctx, Action::Proceed(After::Restart));
+                }
+            }
         }
     }
 
@@ -690,6 +738,12 @@ impl PerkamentApp {
                 });
             });
             ui.menu_button(t("menu.help"), |ui| {
+                item(ui, true, t("upd.check"), Action::CheckUpdates);
+                if ui.checkbox(&mut self.auto_update, t("upd.auto")).clicked() {
+                    crate::settings::set_auto_update(self.auto_update);
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button(t("menu.about")).clicked() {
                     self.dialog = Some(Dialog::About);
                     ui.close();
@@ -1419,6 +1473,35 @@ impl PerkamentApp {
                     ui.button(t("btn.ok")).clicked()
                 });
             }
+            Dialog::Update(update) => {
+                keep = window(t("upd.title"), &mut |ui| {
+                    let own = updater::own_build().unwrap_or(0).to_string();
+                    ui.label(tf("upd.available", &[("name", &update.name), ("own", &own)]));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(t("upd.install")).clicked() {
+                            actions.push(Action::InstallUpdate(update.clone()));
+                            return true;
+                        }
+                        ui.button(t("btn.later")).clicked()
+                    })
+                    .inner
+                });
+            }
+            Dialog::Restart => {
+                keep = window(t("upd.ready_title"), &mut |ui| {
+                    ui.label(t("upd.ready"));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(t("upd.restart")).clicked() {
+                            actions.push(Action::Restart);
+                            return true;
+                        }
+                        ui.button(t("btn.later")).clicked()
+                    })
+                    .inner
+                });
+            }
             Dialog::About => {
                 keep = window(t("menu.about"), &mut |ui| {
                     ui.heading("Perkament");
@@ -1472,6 +1555,17 @@ impl PerkamentApp {
                     doc.pending.remove(&(page, kind));
                 }
                 _ => {}
+            }
+        }
+        // Meldingen van de updater; een open dialoog (met invoer) gaat voor.
+        if self.dialog.is_none() {
+            if let Ok(event) = self.update_rx.try_recv() {
+                match event {
+                    updater::Event::Available(update) => self.dialog = Some(Dialog::Update(update)),
+                    updater::Event::UpToDate => self.status = t("upd.up_to_date").into(),
+                    updater::Event::Installed => self.dialog = Some(Dialog::Restart),
+                    updater::Event::Failed(e) => self.dialog = Some(Dialog::Error(e)),
+                }
             }
         }
         // Zolang er iets wordt gerenderd regelmatig terugkomen, zodat de bewaker kan ingrijpen.

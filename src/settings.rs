@@ -1,4 +1,4 @@
-//! Kleine, blijvende instellingen van de app (nu alleen de taal).
+//! Kleine, blijvende instellingen van de app: de taal en het controleren op updates.
 
 use perkament::i18n::Lang;
 use std::path::PathBuf;
@@ -35,4 +35,38 @@ pub fn save_language(lang: Lang) {
         }
         let _ = std::fs::write(path, lang.code());
     }
+}
+
+fn read(name: &str) -> Option<String> {
+    std::fs::read_to_string(config_dir()?.join(name)).ok().map(|s| s.trim().to_string())
+}
+
+fn write(name: &str, value: &str) {
+    if let Some(dir) = config_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(name), value);
+    }
+}
+
+/// Mag de app zelf op updates controleren? Standaard aan; de controle legt contact met GitHub.
+pub fn auto_update() -> bool {
+    read("auto-update").as_deref() != Some("0")
+}
+
+pub fn set_auto_update(on: bool) {
+    write("auto-update", if on { "1" } else { "0" });
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Is de laatste automatische controle langer dan een dag geleden?
+pub fn update_check_due() -> bool {
+    let last = read("last-update-check").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    now().saturating_sub(last) > 24 * 3600
+}
+
+pub fn mark_update_checked() {
+    write("last-update-check", &now().to_string());
 }

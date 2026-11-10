@@ -3,6 +3,7 @@
 
 mod app;
 mod settings;
+mod updater;
 
 use eframe::egui;
 use perkament::i18n::{self, t};
@@ -20,6 +21,19 @@ fn main() -> eframe::Result {
         if let Err(e) = render_cli(&args[1..]) {
             eprintln!("{}: {e}", t("err.prefix"));
             std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // Headless: `perkament --check-update` meldt of er een nieuwere release is.
+    if args.first().map(String::as_str) == Some("--check-update") {
+        match updater::check() {
+            Ok(Some(update)) => println!("build {}: {} (signed: {})", update.build, update.name, update.signed()),
+            Ok(None) => println!("{}", t("upd.up_to_date")),
+            Err(e) => {
+                eprintln!("{}: {e}", t("err.prefix"));
+                std::process::exit(1);
+            }
         }
         return Ok(());
     }

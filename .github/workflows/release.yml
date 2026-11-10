@@ -15,6 +15,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Het buildnummer wordt in de app gebakken; de updater vergelijkt het met de nieuwste release.
+  PERKAMENT_BUILD: ${{ github.run_number }}
 
 jobs:
   build:
@@ -96,6 +98,26 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      # Elk bestand ondertekenen; de app installeert alleen updates met een geldige handtekening.
+      # Zonder het secret MINISIGN_SECRET_KEY wordt de release niet ondertekend en slaat de
+      # ingebouwde updater hem over.
+      - name: Sign assets
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "::warning::MINISIGN_SECRET_KEY is not set; this release is unsigned"
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y minisign
+          key="$(mktemp)"
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
+          for file in dist/*; do
+            minisign -S -s "$key" -m "$file"
+          done
+          rm -f "$key"
 
       - name: Create release
         env:
