@@ -204,7 +204,7 @@ impl PerkamentApp {
         let (update_tx, update_rx) = channel();
         updater::clean_up();
         let auto_update = crate::settings::auto_update();
-        if auto_update && updater::own_build().is_some() && crate::settings::update_check_due() {
+        if auto_update && updater::can_install() && crate::settings::update_check_due() {
             crate::settings::mark_update_checked();
             let ctx = ctx.clone();
             updater::spawn_check(update_tx.clone(), move || ctx.request_repaint(), true);

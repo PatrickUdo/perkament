@@ -116,6 +116,20 @@ fn run(command: &mut Command) -> Result<(), String> {
     }
 }
 
+/// Kan deze installatie zichzelf vervangen? Niet bij een lokale build, en niet als
+/// de app door een beheerder is geïnstalleerd in een map waar de gebruiker niet mag
+/// schrijven: dan lopen updates via de beheerder en vragen we er niet om.
+pub fn can_install() -> bool {
+    if own_build().is_none() {
+        return false;
+    }
+    let Some(parent) = install_target().ok().and_then(|t| t.parent().map(Path::to_path_buf)) else { return false };
+    let probe = parent.join(format!(".perkament-probe-{}", std::process::id()));
+    let writable = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    writable
+}
+
 /// Wat er op schijf vervangen wordt: de appbundel op macOS, anders het programma zelf.
 fn install_target() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().and_then(|p| p.canonicalize()).map_err(|e| e.to_string())?;
