@@ -29,6 +29,7 @@ enum Tool {
     Note,
     FreeText,
     Ink,
+    Image,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -129,6 +130,8 @@ enum Action {
     ExtractDialog,
     Extract(usize, usize),
     ExportPng,
+    ExportXlsx,
+    PlaceImage(usize, [f32; 4]),
     PropertiesDialog,
     SetMeta(Meta),
     WatermarkDialog,
@@ -517,6 +520,42 @@ impl PerkamentApp {
                     Err(e) => self.error(tf("err.extract", &[("e", &format!("{e:#}"))])),
                 }
             }
+            Action::ExportXlsx => {
+                let Some(doc) = &self.doc else { return };
+                let stem = doc.name().trim_end_matches(".pdf").to_string();
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Excel", &["xlsx"])
+                    .set_file_name(format!("{stem}.xlsx"))
+                    .save_file()
+                else {
+                    return;
+                };
+                match perkament::excel::export_xlsx(&doc.pdf, &path) {
+                    Ok(cells) => {
+                        self.status = tf(
+                            "st.xlsx_exported",
+                            &[("n", &cells.to_string()), ("path", &path.display().to_string())],
+                        )
+                    }
+                    Err(e) => self.error(format!("{e:#}")),
+                }
+            }
+            Action::PlaceImage(page, rect) => {
+                let Some(path) = rfd::FileDialog::new().add_filter("PNG, JPEG", &["png", "jpg", "jpeg"]).pick_file()
+                else {
+                    return;
+                };
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        self.mutate(t("st.image_added"), |d| pdfops::add_image(d, page, rect, &bytes).map(|_| ()));
+                        // Eén afbeelding per keer: daarna weer gewoon kunnen scrollen.
+                        self.tool = Tool::Hand;
+                    }
+                    Err(e) => {
+                        self.error(tf("err.cannot_read", &[("path", &path.display().to_string()), ("e", &e.to_string())]))
+                    }
+                }
+            }
             Action::ExportPng => {
                 let Some(doc) = &mut self.doc else { return };
                 let page = doc.current;
@@ -678,6 +717,7 @@ impl PerkamentApp {
                 item(ui, has_doc, &with_shortcut(t("menu.save_as"), true, "S"), Action::SaveAs);
                 ui.separator();
                 item(ui, has_doc, t("menu.export_png"), Action::ExportPng);
+                item(ui, has_doc, t("menu.export_xlsx"), Action::ExportXlsx);
                 item(ui, has_doc, t("menu.extract"), Action::ExtractDialog);
                 ui.separator();
                 item(ui, has_doc, &with_shortcut(t("menu.close"), false, "W"), Action::CloseDoc);
@@ -773,6 +813,7 @@ impl PerkamentApp {
                     (Tool::Note, t("tool.note"), t("tool.note.tip")),
                     (Tool::FreeText, t("tool.text"), t("tool.text.tip")),
                     (Tool::Ink, t("tool.pen"), t("tool.pen.tip")),
+                    (Tool::Image, t("tool.image"), t("tool.image.tip")),
                 ] {
                     ui.selectable_value(&mut self.tool, tool, label).on_hover_text(tip);
                 }
@@ -1255,7 +1296,9 @@ impl PerkamentApp {
                             Tool::Rectangle => AnnotKind::Rectangle,
                             _ => AnnotKind::FreeText,
                         };
-                        if kind == AnnotKind::FreeText {
+                        if tool == Tool::Image {
+                            actions.push(Action::PlaceImage(page, rect));
+                        } else if kind == AnnotKind::FreeText {
                             self.dialog = Some(Dialog::Text { page, kind, rect, text: String::new() });
                         } else if rect[2] - rect[0] > 2.0 && rect[3] - rect[1] > 2.0 {
                             let annot = NewAnnot { kind, rect, color, text: String::new(), points: vec![] };
@@ -1272,10 +1315,14 @@ impl PerkamentApp {
                     _ => {}
                 }
             }
-            if response.clicked() && matches!(tool, Tool::Note | Tool::FreeText) {
+            if response.clicked() && matches!(tool, Tool::Note | Tool::FreeText | Tool::Image) {
                 if let Some((page, pos)) = pointer.and_then(|p| page_at(p).map(|page| (page, p))) {
                     let p = to_page(page, pos);
                     let (x, y) = doc.geoms[page].view_to_pdf(p.x, p.y);
+                    if tool == Tool::Image {
+                        actions.push(Action::PlaceImage(page, [x, y, x, y]));
+                        return;
+                    }
                     let kind = if tool == Tool::Note { AnnotKind::Note } else { AnnotKind::FreeText };
                     self.dialog = Some(Dialog::Text { page, kind, rect: [x, y, x, y], text: String::new() });
                 }

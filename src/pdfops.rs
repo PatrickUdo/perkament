@@ -271,6 +271,12 @@ fn to_user(m: [f32; 6], x: f32, y: f32) -> (f32, f32) {
     (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
 }
 
+/// Een punt in PDF-gebruikersruimte, omgerekend naar de pagina zoals getoond
+/// (oorsprong linksonder, rekening houdend met rotatie en bijsnijden).
+pub fn display_point(doc: &Document, pid: ObjectId, x: f32, y: f32) -> (f32, f32) {
+    to_display(display_space(doc, pid).2, x, y)
+}
+
 fn bbox(a: (f32, f32), b: (f32, f32)) -> [f32; 4] {
     [a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1)]
 }
@@ -913,6 +919,104 @@ pub fn add_annotation(doc: &mut Document, page_index: usize, a: &NewAnnot) -> Re
     Ok(annot_id)
 }
 
+/// Hangt een annotatie aan /Annots van de pagina (directe array, verwijzing, of nog niet aanwezig).
+fn attach_annotation(doc: &mut Document, pid: ObjectId, annot_id: ObjectId) -> Result<()> {
+    match doc.get_dictionary(pid)?.get(b"Annots").ok().cloned() {
+        Some(Object::Reference(arr_id)) if doc.get_object(arr_id).map(|o| o.as_array().is_ok()).unwrap_or(false) => {
+            doc.get_object_mut(arr_id)?.as_array_mut()?.push(annot_id.into());
+        }
+        Some(Object::Array(mut arr)) => {
+            arr.push(annot_id.into());
+            doc.get_dictionary_mut(pid)?.set("Annots", arr);
+        }
+        _ => doc.get_dictionary_mut(pid)?.set("Annots", vec![Object::Reference(annot_id)]),
+    }
+    Ok(())
+}
+
+/// Grootste zijde (in pixels) waarmee een afbeelding in de PDF wordt opgenomen.
+const MAX_IMAGE_SIDE: u32 = 2400;
+
+/// Plaatst een afbeelding (PNG of JPEG) op de pagina. `rect` is het gesleepte
+/// vlak in PDF-gebruikersruimte; de afbeelding past daarbinnen met behoud van
+/// verhoudingen, rechtop zoals de pagina wordt getoond. Een klik (vlak zonder
+/// afmetingen) geeft een standaardbreedte.
+///
+/// De afbeelding wordt een stempel-annotatie, zodat hij in de lijst met
+/// opmerkingen staat en weer te verwijderen is.
+pub fn add_image(doc: &mut Document, page_index: usize, rect: [f32; 4], file: &[u8]) -> Result<ObjectId> {
+    let pid = page_id(doc, page_index)?;
+    let decoded = image::load_from_memory(file).map_err(|_| anyhow!(t("err.image")))?;
+    let decoded = if decoded.width().max(decoded.height()) > MAX_IMAGE_SIDE {
+        decoded.resize(MAX_IMAGE_SIDE, MAX_IMAGE_SIDE, image::imageops::FilterType::Triangle)
+    } else {
+        decoded
+    };
+    let rgba = decoded.to_rgba8();
+    let (pw, ph) = (rgba.width(), rgba.height());
+    if pw == 0 || ph == 0 {
+        bail!(t("err.image"));
+    }
+    let mut rgb = Vec::with_capacity((pw * ph * 3) as usize);
+    let mut alpha = Vec::with_capacity((pw * ph) as usize);
+    for pixel in rgba.pixels() {
+        rgb.extend_from_slice(&pixel.0[..3]);
+        alpha.push(pixel.0[3]);
+    }
+
+    // Opmaak in weergaveruimte, net als bij een tekstvak.
+    let (dw, dh, m) = display_space(doc, pid);
+    let d = bbox(to_display(m, rect[0], rect[1]), to_display(m, rect[2], rect[3]));
+    let aspect = pw as f32 / ph as f32;
+    let (box_w, box_h) = (d[2] - d[0], d[3] - d[1]);
+    let (mut w, mut h) = if box_w < 8.0 || box_h < 8.0 {
+        (200.0, 200.0 / aspect)
+    } else {
+        let scale = (box_w / pw as f32).min(box_h / ph as f32);
+        (pw as f32 * scale, ph as f32 * scale)
+    };
+    // Niet groter dan de pagina.
+    let shrink = (dw / w).min(dh / h).min(1.0);
+    w *= shrink;
+    h *= shrink;
+    let left = d[0].clamp(0.0, (dw - w).max(0.0));
+    let top = d[3].clamp(h.min(dh), dh);
+    let rect = bbox(to_user(m, left, top - h), to_user(m, left + w, top));
+
+    let image_dict = |color_space: &str| {
+        dictionary! {
+            "Type" => "XObject", "Subtype" => "Image", "Width" => pw as i64, "Height" => ph as i64,
+            "ColorSpace" => color_space, "BitsPerComponent" => 8,
+        }
+    };
+    let mut image = Stream::new(image_dict("DeviceRGB"), rgb);
+    if alpha.iter().any(|&a| a < 255) {
+        let mut mask = Stream::new(image_dict("DeviceGray"), alpha);
+        let _ = mask.compress();
+        image.dict.set("SMask", doc.add_object(mask));
+    }
+    let _ = image.compress();
+    let image_id = doc.add_object(image);
+
+    let mut form = dictionary! {
+        "Type" => "XObject", "Subtype" => "Form",
+        "BBox" => vec![0.into(), 0.into(), w.into(), h.into()],
+        "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => image_id } },
+    };
+    if rotation(doc, pid) != 0 {
+        form.set("Matrix", vec![m[0].into(), m[1].into(), m[2].into(), m[3].into(), 0.into(), 0.into()]);
+    }
+    let ap = doc.add_object(Stream::new(form, format!("q {w:.3} 0 0 {h:.3} 0 0 cm /Im0 Do Q").into_bytes()));
+    let annot_id = doc.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Stamp", "Name" => "Image",
+        "Rect" => vec![rect[0].into(), rect[1].into(), rect[2].into(), rect[3].into()],
+        "F" => 4, "P" => pid, "M" => now_pdf_date(), "T" => Object::string_literal(APP_NAME),
+        "AP" => dictionary! { "N" => ap },
+    });
+    attach_annotation(doc, pid, annot_id)?;
+    Ok(annot_id)
+}
+
 fn annot_refs(doc: &Document, pid: ObjectId) -> Vec<ObjectId> {
     let Ok(page) = doc.get_dictionary(pid) else { return vec![] };
     let Ok(obj) = page.get(b"Annots") else { return vec![] };
@@ -942,6 +1046,9 @@ pub fn list_annotations(doc: &Document) -> Vec<AnnotInfo> {
                 "Ink" => t("annot.ink"),
                 "Underline" => t("annot.underline"),
                 "StrikeOut" => t("annot.strikeout"),
+                "Stamp" if dict.get(b"Name").ok().and_then(|n| n.as_name().ok()) == Some(b"Image".as_slice()) => {
+                    t("annot.image")
+                }
                 "Stamp" => t("annot.stamp"),
                 other => other,
             }

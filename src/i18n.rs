@@ -281,6 +281,18 @@ static STRINGS: &[(&str, [&str; 5])] = &[
     ("err.usage", ["gebruik: perkament --render in.pdf uitvoermap [schaal]", "usage: perkament --render in.pdf output-dir [scale]", "Aufruf: perkament --render in.pdf ausgabeordner [skalierung]", "usage : perkament --render in.pdf dossier-sortie [échelle]", "uso: perkament --render in.pdf carpeta-salida [escala]"]),
     ("err.prefix", ["fout", "error", "Fehler", "erreur", "error"]),
 
+    // Excel-export en afbeeldingen
+    ("menu.export_xlsx", ["Exporteren naar Excel…", "Export to Excel…", "Nach Excel exportieren…", "Exporter vers Excel…", "Exportar a Excel…"]),
+    ("xlsx.sheet", ["Pagina {n}", "Page {n}", "Seite {n}", "Page {n}", "Página {n}"]),
+    ("st.xlsx_exported", ["{n} cellen geëxporteerd naar {path}.", "{n} cells exported to {path}.", "{n} Zellen exportiert nach {path}.", "{n} cellules exportées vers {path}.", "{n} celdas exportadas a {path}."]),
+    ("err.xlsx", ["kan het Excel-bestand niet schrijven", "cannot write the Excel file", "Excel-Datei kann nicht geschrieben werden", "impossible d'écrire le fichier Excel", "no se puede escribir el archivo de Excel"]),
+    ("err.no_text", ["er is geen tekst gevonden om te exporteren (is dit een scan?)", "no text was found to export (is this a scan?)", "kein Text zum Exportieren gefunden (ist dies ein Scan?)", "aucun texte à exporter n'a été trouvé (est-ce un scan ?)", "no se encontró texto para exportar (¿es un escaneo?)"]),
+    ("tool.image", ["Afbeelding", "Image", "Bild", "Image", "Imagen"]),
+    ("tool.image.tip", ["Sleep een vlak of klik, en kies daarna een afbeelding", "Drag an area or click, then choose an image", "Bereich aufziehen oder klicken und dann ein Bild wählen", "Faites glisser une zone ou cliquez, puis choisissez une image", "Arrastra una zona o haz clic y luego elige una imagen"]),
+    ("st.image_added", ["Afbeelding geplaatst.", "Image placed.", "Bild eingefügt.", "Image placée.", "Imagen colocada."]),
+    ("err.image", ["dit bestand is geen leesbare PNG- of JPEG-afbeelding", "this file is not a readable PNG or JPEG image", "diese Datei ist kein lesbares PNG- oder JPEG-Bild", "ce fichier n'est pas une image PNG ou JPEG lisible", "este archivo no es una imagen PNG o JPEG legible"]),
+    ("annot.image", ["Afbeelding", "Image", "Bild", "Image", "Imagen"]),
+
     // Updates
     ("upd.check", ["Controleren op updates…", "Check for Updates…", "Nach Updates suchen…", "Rechercher des mises à jour…", "Buscar actualizaciones…"]),
     ("upd.auto", ["Automatisch op updates controleren", "Check for updates automatically", "Automatisch nach Updates suchen", "Rechercher automatiquement les mises à jour", "Buscar actualizaciones automáticamente"]),
