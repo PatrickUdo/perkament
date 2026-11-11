@@ -705,6 +705,10 @@ pub struct AnnotInfo {
     pub page: usize,
     pub kind: String,
     pub contents: String,
+    /// (x0, y0, x1, y1) in PDF-gebruikersruimte.
+    pub rect: [f32; 4],
+    /// Een via [`add_image`] geplaatste afbeelding: te verplaatsen en te schalen.
+    pub is_image: bool,
 }
 
 fn helvetica(bold: bool) -> Dictionary {
@@ -1017,6 +1021,26 @@ pub fn add_image(doc: &mut Document, page_index: usize, rect: [f32; 4], file: &[
     Ok(annot_id)
 }
 
+fn is_image_annotation(dict: &Dictionary) -> bool {
+    let name = |key: &[u8]| dict.get(key).ok().and_then(|n| n.as_name().ok());
+    name(b"Subtype") == Some(b"Stamp".as_slice()) && name(b"Name") == Some(b"Image".as_slice())
+}
+
+/// Verplaatst of schaalt een geplaatste afbeelding door zijn kader te wijzigen.
+/// Een viewer past de weergave vanzelf in het nieuwe kader.
+pub fn set_image_rect(doc: &mut Document, page_index: usize, annot: ObjectId, rect: [f32; 4]) -> Result<()> {
+    let pid = page_id(doc, page_index)?;
+    let known = annot_refs(doc, pid).contains(&annot) && doc.get_dictionary(annot).is_ok_and(is_image_annotation);
+    let rect = [rect[0].min(rect[2]), rect[1].min(rect[3]), rect[0].max(rect[2]), rect[1].max(rect[3])];
+    if !known || !rect.iter().all(|v| v.is_finite()) || rect[2] - rect[0] < 1.0 || rect[3] - rect[1] < 1.0 {
+        bail!(t("err.too_small"));
+    }
+    let dict = doc.get_dictionary_mut(annot)?;
+    dict.set("Rect", vec![rect[0].into(), rect[1].into(), rect[2].into(), rect[3].into()]);
+    dict.set("M", now_pdf_date());
+    Ok(())
+}
+
 fn annot_refs(doc: &Document, pid: ObjectId) -> Vec<ObjectId> {
     let Ok(page) = doc.get_dictionary(pid) else { return vec![] };
     let Ok(obj) = page.get(b"Annots") else { return vec![] };
@@ -1060,7 +1084,16 @@ pub fn list_annotations(doc: &Document) -> Vec<AnnotInfo> {
                 .and_then(|(_, o)| o.as_str().ok())
                 .map(decode_text_string)
                 .unwrap_or_default();
-            out.push(AnnotInfo { id, page, kind, contents });
+            let corners: Vec<f32> = match dict.get(b"Rect").ok().and_then(|o| doc.dereference(o).ok()) {
+                Some((_, Object::Array(a))) => a.iter().filter_map(|o| number(doc, o)).collect(),
+                _ => Vec::new(),
+            };
+            let rect = match corners[..] {
+                [a, b, c, d] => [a.min(c), b.min(d), a.max(c), b.max(d)],
+                _ => [0.0; 4],
+            };
+            let is_image = is_image_annotation(dict);
+            out.push(AnnotInfo { id, page, kind, contents, rect, is_image });
         }
     }
     out

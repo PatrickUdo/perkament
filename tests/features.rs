@@ -141,3 +141,55 @@ fn huge_image_is_scaled_down() {
     }).collect();
     assert_eq!(widths, vec![2400]);
 }
+
+/// Kleur van één pixel in een gerenderde pagina.
+fn pixel(png_bytes: &[u8], x: u32, y: u32) -> [u8; 3] {
+    let img = image::load_from_memory(png_bytes).unwrap().to_rgb8();
+    img.get_pixel(x, y).0
+}
+
+#[test]
+fn placed_image_can_be_moved_and_resized() {
+    for rotate in [0i64, 90] {
+        let mut doc = build(b"0 g", rotate);
+        let g = render::page_geometries(pdfops::to_bytes(&mut doc).unwrap()).unwrap()[0];
+        let user = |x0: f32, y0: f32, x1: f32, y1: f32| {
+            let (a, b) = (g.view_to_pdf(x0, y0), g.view_to_pdf(x1, y1));
+            [a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1)]
+        };
+        // Geplaatst op (50,60) met 200 x 100 in de weergave.
+        let id = pdfops::add_image(&mut doc, 0, user(50.0, 60.0, 250.0, 260.0), &png(200, 100, false)).unwrap();
+        let info = pdfops::list_annotations(&doc);
+        assert!(info[0].is_image && info[0].id == id);
+
+        // Verplaatsen naar (120,300) en halveren: 100 x 50.
+        pdfops::set_image_rect(&mut doc, 0, id, user(120.0, 300.0, 220.0, 350.0)).unwrap();
+        let shown = render::render_png(pdfops::to_bytes(&mut doc).unwrap(), 0, 1.0).unwrap();
+        let white = [255, 255, 255];
+        assert_eq!(pixel(&shown, 150, 110), white, "rotatie {rotate}: de afbeelding staat nog op de oude plek");
+        assert_ne!(pixel(&shown, 170, 325), white, "rotatie {rotate}: de afbeelding staat niet op de nieuwe plek");
+        assert_eq!(pixel(&shown, 230, 325), white, "rotatie {rotate}: de afbeelding is niet verkleind");
+        // Rechtop gebleven: linksboven blauw, rechtsboven naar magenta (meer rood).
+        let (left, right) = (pixel(&shown, 125, 303), pixel(&shown, 215, 303));
+        assert!(right[0] > left[0] + 80, "rotatie {rotate}: {left:?} {right:?}");
+
+        // Bewaard en opnieuw geladen staat hij er nog zo.
+        let again = pdfops::load(&pdfops::to_bytes_for_saving(&doc).unwrap()).unwrap();
+        let r = pdfops::list_annotations(&again)[0].rect;
+        let want = user(120.0, 300.0, 220.0, 350.0);
+        assert!(r.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.01), "{r:?} {want:?}");
+    }
+}
+
+#[test]
+fn only_placed_images_can_be_moved() {
+    let mut doc = build(b"0 g", 0);
+    let note = pdfops::add_annotation(&mut doc, 0, &pdfops::NewAnnot {
+        kind: pdfops::AnnotKind::Note, rect: [100.0, 100.0, 100.0, 100.0], color: [1.0, 0.8, 0.0], text: "x".into(), points: vec![],
+    }).unwrap();
+    assert!(pdfops::set_image_rect(&mut doc, 0, note, [10.0, 10.0, 60.0, 60.0]).is_err());
+    let id = pdfops::add_image(&mut doc, 0, [10.0, 10.0, 100.0, 100.0], &png(50, 50, false)).unwrap();
+    assert!(pdfops::set_image_rect(&mut doc, 0, id, [10.0, 10.0, 10.2, 10.2]).is_err(), "te klein kader geaccepteerd");
+    assert!(pdfops::set_image_rect(&mut doc, 0, id, [f32::NAN, 10.0, 60.0, 60.0]).is_err());
+    assert!(pdfops::set_image_rect(&mut doc, 0, id, [60.0, 60.0, 10.0, 10.0]).is_ok());
+}

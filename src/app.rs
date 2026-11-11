@@ -111,6 +111,8 @@ enum Drag {
     /// Startpunt in paginaruimte (punten, oorsprong linksboven, zonder zoom).
     Rect { page: usize, start: Pos2, now: Pos2 },
     Ink { page: usize, points: Vec<Pos2> },
+    /// Een geplaatste afbeelding verslepen (`corner` leeg) of aan een hoek schalen.
+    Image { page: usize, id: lopdf::ObjectId, start: Rect, grab: Pos2, corner: Option<usize>, now: Rect },
 }
 
 enum Action {
@@ -140,6 +142,7 @@ enum Action {
     AddPageNumbers(String),
     AddAnnot(usize, NewAnnot),
     DeleteAnnot(usize, lopdf::ObjectId),
+    MoveImage(usize, lopdf::ObjectId, [f32; 4]),
     ReplaceText(usize, TextLine, String),
     Search,
     GoTo(usize),
@@ -540,6 +543,9 @@ impl PerkamentApp {
                     Err(e) => self.error(format!("{e:#}")),
                 }
             }
+            Action::MoveImage(page, id, rect) => {
+                self.mutate(t("st.image_moved"), |d| pdfops::set_image_rect(d, page, id, rect));
+            }
             Action::PlaceImage(page, rect) => {
                 let Some(path) = rfd::FileDialog::new().add_filter("PNG, JPEG", &["png", "jpg", "jpeg"]).pick_file()
                 else {
@@ -548,8 +554,6 @@ impl PerkamentApp {
                 match std::fs::read(&path) {
                     Ok(bytes) => {
                         self.mutate(t("st.image_added"), |d| pdfops::add_image(d, page, rect, &bytes).map(|_| ()));
-                        // Eén afbeelding per keer: daarna weer gewoon kunnen scrollen.
-                        self.tool = Tool::Hand;
                     }
                     Err(e) => {
                         self.error(tf("err.cannot_read", &[("path", &path.display().to_string()), ("e", &e.to_string())]))
@@ -1233,7 +1237,52 @@ impl PerkamentApp {
             let to_screen = |page: usize, p: Pos2| rects[page].translate(origin).min + p.to_vec2() * zoom;
             let pointer = response.interact_pointer_pos();
 
-            if let Drag::Rect { page, .. } | Drag::Ink { page, .. } = &self.drag {
+            // Geplaatste afbeeldingen op de zichtbare pagina's, in paginaruimte.
+            let images: Vec<(usize, lopdf::ObjectId, Rect)> = if tool == Tool::Image {
+                doc.annots
+                    .iter()
+                    .filter(|a| a.is_image && self.kept.contains(&a.page) && a.page < doc.geoms.len())
+                    .map(|a| {
+                        let g = doc.geoms[a.page];
+                        let (p, q) = (g.pdf_to_view(a.rect[0], a.rect[1]), g.pdf_to_view(a.rect[2], a.rect[3]));
+                        (a.page, a.id, Rect::from_two_pos(Pos2::new(p.0, p.1), Pos2::new(q.0, q.1)))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let handle = 7.0 / zoom;
+            // Welke afbeelding ligt onder dit punt, en is het een hoek? De bovenste eerst.
+            let image_at = |page: usize, p: Pos2| {
+                images.iter().rev().filter(|(pg, _, _)| *pg == page).find_map(|(_, id, r)| {
+                    let corner = crate::imagedrag::corners(*r).iter().position(|c| c.distance(p) <= handle);
+                    (corner.is_some() || r.contains(p)).then_some((*id, *r, corner))
+                })
+            };
+            let accent = ui.visuals().selection.bg_fill;
+            for (page, id, r) in &images {
+                // Tijdens het slepen het nieuwe kader tonen in plaats van het oude.
+                let (r, active) = match &self.drag {
+                    Drag::Image { id: dragged, now, .. } if dragged == id => (*now, true),
+                    _ => (*r, false),
+                };
+                let on_screen = Rect::from_two_pos(to_screen(*page, r.min), to_screen(*page, r.max));
+                painter.rect_stroke(on_screen, 0.0, Stroke::new(if active { 2.0 } else { 1.0 }, accent), StrokeKind::Outside);
+                for corner in crate::imagedrag::corners(on_screen) {
+                    painter.rect_filled(Rect::from_center_size(corner, Vec2::splat(7.0)), 1.0, accent);
+                }
+            }
+            if let Some((page, pos)) = response.hover_pos().and_then(|p| page_at(p).map(|page| (page, p))) {
+                if let Some((_, _, corner)) = image_at(page, to_page(page, pos)) {
+                    ui.ctx().set_cursor_icon(match corner {
+                        Some(0) | Some(2) => egui::CursorIcon::ResizeNwSe,
+                        Some(_) => egui::CursorIcon::ResizeNeSw,
+                        None => egui::CursorIcon::Grab,
+                    });
+                }
+            }
+
+            if let Drag::Rect { page, .. } | Drag::Ink { page, .. } | Drag::Image { page, .. } = &self.drag {
                 if *page >= rects.len() || *page >= doc.geoms.len() {
                     self.drag = Drag::None;
                 }
@@ -1244,6 +1293,10 @@ impl PerkamentApp {
                 if let Some((page, pos)) = pressed.and_then(|p| page_at(p).map(|page| (page, p))) {
                     let start = to_page(page, pos);
                     self.drag = match tool {
+                        Tool::Image if image_at(page, start).is_some() => {
+                            let (id, rect, corner) = image_at(page, start).expect("zojuist gecontroleerd");
+                            Drag::Image { page, id, start: rect, grab: start, corner, now: rect }
+                        }
                         Tool::Ink => Drag::Ink { page, points: vec![start] },
                         Tool::Note => Drag::None,
                         _ => Drag::Rect { page, start, now: start },
@@ -1254,6 +1307,14 @@ impl PerkamentApp {
                 if let Some(pos) = pointer {
                     match &mut self.drag {
                         Drag::Rect { page, now, .. } => *now = to_page(*page, pos),
+                        Drag::Image { page, start, grab, corner, now, .. } => {
+                            let p = to_page(*page, pos);
+                            let size = Vec2::new(doc.geoms[*page].w, doc.geoms[*page].h);
+                            *now = match corner {
+                                Some(corner) => crate::imagedrag::resized(*start, *corner, p, size),
+                                None => crate::imagedrag::moved(*start, p - *grab, size),
+                            };
+                        }
                         Drag::Ink { page, points } => {
                             let p = to_page(*page, pos);
                             if points.last().is_none_or(|l| l.distance(p) > 1.0 / zoom) {
@@ -1282,10 +1343,19 @@ impl PerkamentApp {
                     let line: Vec<Pos2> = points.iter().map(|p| to_screen(*page, *p)).collect();
                     painter.line(line, Stroke::new(2.0 * zoom, stroke_color));
                 }
-                Drag::None => {}
+                Drag::None | Drag::Image { .. } => {}
             }
             if response.drag_stopped() {
                 match std::mem::replace(&mut self.drag, Drag::None) {
+                    Drag::Image { page, id, start, now, .. } => {
+                        if now != start {
+                            let g = doc.geoms[page];
+                            let a = g.view_to_pdf(now.min.x, now.min.y);
+                            let b = g.view_to_pdf(now.max.x, now.max.y);
+                            let rect = [a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1)];
+                            actions.push(Action::MoveImage(page, id, rect));
+                        }
+                    }
                     Drag::Rect { page, start, now } => {
                         let g = doc.geoms[page];
                         let a = g.view_to_pdf(start.x, start.y);
@@ -1320,7 +1390,10 @@ impl PerkamentApp {
                     let p = to_page(page, pos);
                     let (x, y) = doc.geoms[page].view_to_pdf(p.x, p.y);
                     if tool == Tool::Image {
-                        actions.push(Action::PlaceImage(page, [x, y, x, y]));
+                        // Een klik op een bestaande afbeelding plaatst geen nieuwe.
+                        if image_at(page, p).is_none() {
+                            actions.push(Action::PlaceImage(page, [x, y, x, y]));
+                        }
                         return;
                     }
                     let kind = if tool == Tool::Note { AnnotKind::Note } else { AnnotKind::FreeText };
