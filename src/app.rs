@@ -1625,7 +1625,13 @@ impl PerkamentApp {
             Dialog::About => {
                 keep = window(t("menu.about"), &mut |ui| {
                     ui.heading("Perkament");
-                    ui.label(tf("about.version", &[("v", env!("CARGO_PKG_VERSION"))]));
+                    // Het buildnummer erbij: daaraan zie je of een update is aangekomen.
+                    let build = match updater::own_build() {
+                        Some(build) => format!("build {build}"),
+                        None => "dev".to_string(),
+                    };
+                    let version = format!("{} ({build})", env!("CARGO_PKG_VERSION"));
+                    ui.label(tf("about.version", &[("v", &version)]));
                     ui.label(t("about.body"));
                     ui.add_space(8.0);
                     ui.button(t("btn.close")).clicked()
