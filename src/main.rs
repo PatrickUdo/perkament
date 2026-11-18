@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod diag;
 mod imagedrag;
 mod settings;
 mod updater;
@@ -10,6 +11,38 @@ use eframe::egui;
 use perkament::i18n::{self, t};
 use perkament::{pdfops, render};
 use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Stelt de grafische aansturing in.
+///
+/// Op Windows alleen DirectX 12: het opstarten van Vulkan laadt alle stuurprogramma's en
+/// overlay-lagen van de machine, en dat crasht op sommige kantoorlaptops af en toe nog
+/// voor er een venster is. De zuinige grafische kaart is voor een PDF-programma ruim
+/// genoeg en voorkomt het omschakelen naar een tweede kaart.
+fn configure_graphics(options: &mut eframe::NativeOptions, level: u8) {
+    use eframe::egui_wgpu::WgpuSetup;
+    use eframe::wgpu;
+    let WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup else { return };
+    // De omgevingsvariabelen van wgpu blijven voorgaan, voor wie iets anders wil proberen.
+    if cfg!(windows) && std::env::var_os("WGPU_BACKEND").is_none() {
+        setup.instance_descriptor.backends = wgpu::Backends::DX12;
+    }
+    if std::env::var_os("WGPU_POWER_PREF").is_none() {
+        setup.power_preference = wgpu::PowerPreference::LowPower;
+    }
+    if level >= diag::SOFTWARE {
+        // Na een mislukte start: de softwarematige weergave (op Windows altijd aanwezig),
+        // die geen stuurprogramma van de grafische kaart gebruikt.
+        setup.native_adapter_selector = Some(Arc::new(|adapters, _surface| {
+            adapters
+                .iter()
+                .find(|a| a.get_info().device_type == wgpu::DeviceType::Cpu)
+                .or_else(|| adapters.first())
+                .cloned()
+                .ok_or_else(|| "no graphics adapter found".to_string())
+        }));
+    }
+}
 
 fn main() -> eframe::Result {
     // Volgorde: PERKAMENT_LANG (handig bij testen), dan de bewaarde keuze, dan de systeemtaal.
@@ -52,8 +85,17 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
+    diag::install_panic_hook();
+    diag::log(format!(
+        "starting Perkament {} (build {}) on {} {}",
+        env!("CARGO_PKG_VERSION"),
+        updater::own_build().map_or("dev".to_string(), |b| b.to_string()),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    let level = diag::begin_start();
     let initial = args.first().map(PathBuf::from);
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(pdfops::APP_NAME)
             .with_inner_size([1280.0, 860.0])
@@ -69,11 +111,22 @@ fn main() -> eframe::Result {
         })),
         ..Default::default()
     };
-    eframe::run_native(
+    configure_graphics(&mut options, level);
+    let result = eframe::run_native(
         pdfops::APP_NAME,
         options,
         Box::new(move |cc| Ok(Box::new(app::PerkamentApp::new(cc, initial)))),
-    )
+    );
+    if let Err(error) = &result {
+        // Het venster kwam er niet. Eén keer opnieuw proberen met de softwarematige weergave.
+        let retry = diag::start_failed(&error.to_string());
+        if retry && std::env::var_os("PERKAMENT_RELAUNCHED").is_none() {
+            if let Ok(exe) = std::env::current_exe() {
+                let _ = std::process::Command::new(exe).args(&args).env("PERKAMENT_RELAUNCHED", "1").spawn();
+            }
+        }
+    }
+    result
 }
 
 fn render_cli(args: &[String]) -> Result<(), String> {

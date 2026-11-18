@@ -197,6 +197,8 @@ pub struct PerkamentApp {
     update_tx: Sender<updater::Event>,
     update_rx: Receiver<updater::Event>,
     auto_update: bool,
+    /// Aantal getekende beelden, tot de start als gelukt is gemeld.
+    frames_drawn: u8,
 }
 
 impl PerkamentApp {
@@ -206,6 +208,13 @@ impl PerkamentApp {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
         });
+        if let Some(state) = &cc.wgpu_render_state {
+            let info = state.adapter.get_info();
+            crate::diag::log(format!(
+                "graphics: {} ({:?}, {:?}), driver {} {}",
+                info.name, info.backend, info.device_type, info.driver, info.driver_info
+            ));
+        }
         // Updates: resten van een vorige update opruimen en hooguit eens per dag zelf controleren.
         let (update_tx, update_rx) = channel();
         updater::clean_up();
@@ -246,6 +255,7 @@ impl PerkamentApp {
             update_tx,
             update_rx,
             auto_update,
+            frames_drawn: 0,
         }
     }
 
@@ -1706,6 +1716,14 @@ impl eframe::App for PerkamentApp {
         let ctx = ui.ctx().clone();
         let mut actions = Vec::new();
 
+        // Na een paar getekende beelden staat vast dat het opstarten is gelukt.
+        if self.frames_drawn < 3 {
+            self.frames_drawn += 1;
+            if self.frames_drawn == 3 {
+                crate::diag::start_completed();
+            }
+            ctx.request_repaint();
+        }
         if let Some(path) = self.initial.take() {
             self.open_path(&path);
         }

@@ -4,7 +4,7 @@ use perkament::i18n::Lang;
 use std::path::PathBuf;
 
 /// Map voor instellingen, volgens de gewoonte van het platform.
-fn config_dir() -> Option<PathBuf> {
+pub(crate) fn config_dir() -> Option<PathBuf> {
     let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
     if cfg!(target_os = "macos") {
         var("HOME").map(|home| home.join("Library/Application Support/Perkament"))
@@ -37,11 +37,11 @@ pub fn save_language(lang: Lang) {
     }
 }
 
-fn read(name: &str) -> Option<String> {
+pub(crate) fn read(name: &str) -> Option<String> {
     std::fs::read_to_string(config_dir()?.join(name)).ok().map(|s| s.trim().to_string())
 }
 
-fn write(name: &str, value: &str) {
+pub(crate) fn write(name: &str, value: &str) {
     if let Some(dir) = config_dir() {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join(name), value);
