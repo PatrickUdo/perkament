@@ -127,7 +127,25 @@ pub fn can_install() -> bool {
     let probe = parent.join(format!(".perkament-probe-{}", std::process::id()));
     let writable = std::fs::write(&probe, b"").is_ok();
     let _ = std::fs::remove_file(&probe);
-    writable
+    writable && replaceable(&install_target().unwrap_or_default())
+}
+
+/// Mag deze gebruiker het programma zelf vervangen? In een map als ProgramData mag
+/// iedereen bestanden aanmaken, maar een door de beheerder geplaatst programma niet
+/// hernoemen of verwijderen; dan zou een update halverwege mislukken.
+#[cfg(windows)]
+fn replaceable(target: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    // Vraag alleen het recht om te verwijderen (nodig voor hernoemen), en sta toe dat
+    // het bestand intussen in gebruik is: het draaiende programma is dit bestand zelf.
+    const DELETE: u32 = 0x0001_0000;
+    const SHARE_ALL: u32 = 0x0000_0007;
+    std::fs::OpenOptions::new().access_mode(DELETE).share_mode(SHARE_ALL).open(target).is_ok()
+}
+
+#[cfg(not(windows))]
+fn replaceable(_target: &Path) -> bool {
+    true
 }
 
 /// Wat er op schijf vervangen wordt: de appbundel op macOS, anders het programma zelf.
