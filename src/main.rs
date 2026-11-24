@@ -59,6 +59,25 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
+    // Headless: `perkament --repair in.pdf uit.pdf` herstelt bestanden met de kleurfout van eerdere versies.
+    if args.first().map(String::as_str) == Some("--repair") {
+        let result = (|| -> anyhow::Result<usize> {
+            let [_, input, output] = &args[..] else { anyhow::bail!("{}", t("err.usage")) };
+            let mut doc = pdfops::load(&std::fs::read(input)?)?;
+            let fixed = perkament::textedit::repair_overlay_colors(&mut doc);
+            std::fs::write(output, pdfops::to_bytes_for_saving(&doc)?)?;
+            Ok(fixed)
+        })();
+        match result {
+            Ok(fixed) => println!("{fixed}"),
+            Err(e) => {
+                eprintln!("{}: {e:#}", t("err.prefix"));
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     // Headless: `perkament --check-update` meldt of er een nieuwere release is.
     if args.first().map(String::as_str) == Some("--check-update") {
         match updater::check() {

@@ -542,12 +542,73 @@ struct Fragment {
     gaps: Vec<f32>,
 }
 
+/// De kleurruimte voor vullen. `g`, `rg` en `k` stellen die ook in, niet alleen `cs`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Space {
+    /// Nog niets ingesteld: grijs.
+    Default,
+    Gray,
+    Rgb,
+    Cmyk,
+    /// Een benoemde kleurruimte (`/CS0 cs`); de bytes van die operatie.
+    Named(Range),
+}
+
+/// Een kleuroperatie: bytes, aantal getallen, en of het `sc`/`scn` was (in plaats van `g`/`rg`/`k`).
+type ColorOp = (Range, usize, bool);
+
+fn device_name(space: Space, components: usize) -> &'static [u8] {
+    // Het aantal getallen bepaalt de ruimte. Sommige programma's (Crystal Reports) laten
+    // `cs` weg en vertrouwen op een eerdere `rg`; andere PDF-lezers verdragen dat in het
+    // origineel, maar niet als wij alleen de kleur overnemen.
+    match (components, space) {
+        (1, _) => b"/DeviceGray",
+        (3, _) => b"/DeviceRGB",
+        (4, _) => b"/DeviceCMYK",
+        (_, Space::Rgb) => b"/DeviceRGB",
+        (_, Space::Cmyk) => b"/DeviceCMYK",
+        _ => b"/DeviceGray",
+    }
+}
+
+/// Operatoren die de vulkleur instellen zoals op dit punt in de pagina, los te gebruiken
+/// in een nieuwe content stream (die begint met de standaardtoestand). Leeg = zwart.
+fn fill_color(data: &[u8], space: Space, color: Option<ColorOp>) -> Vec<u8> {
+    let mut out = Vec::new();
+    match (space, color) {
+        (Space::Named(r), color) => {
+            out.extend_from_slice(&data[r.0..r.1]);
+            out.push(b' ');
+            if let Some((c, _, _)) = color {
+                out.extend_from_slice(&data[c.0..c.1]);
+                out.push(b' ');
+            }
+        }
+        (space, Some((c, n, true))) => {
+            out.extend_from_slice(device_name(space, n));
+            out.extend_from_slice(b" cs ");
+            out.extend_from_slice(&data[c.0..c.1]);
+            out.push(b' ');
+        }
+        (_, Some((c, _, false))) => {
+            out.extend_from_slice(&data[c.0..c.1]);
+            out.push(b' ');
+        }
+        (Space::Default, None) => {}
+        (space, None) => {
+            out.extend_from_slice(device_name(space, 0));
+            out.extend_from_slice(b" cs ");
+        }
+    }
+    out
+}
+
 /// De grafische toestand voor zover die voor tekst telt; `q`/`Q` bewaren hem volledig.
 #[derive(Clone)]
 struct State {
     ctm: Matrix,
-    color_space: Option<Range>,
-    color: Option<Range>,
+    space: Space,
+    color: Option<ColorOp>,
     font: Vec<u8>,
     size: f32,
     char_space: f32,
@@ -584,7 +645,7 @@ fn analyse(doc: &Document, pid: ObjectId, data: &[u8]) -> Analysis {
     let mut stack: Vec<State> = Vec::new();
     let mut gs = State {
         ctm: IDENTITY,
-        color_space: None,
+        space: Space::Default,
         color: None,
         font: Vec::new(),
         size: 0.0,
@@ -610,14 +671,27 @@ fn analyse(doc: &Document, pid: ObjectId, data: &[u8]) -> Analysis {
             }
             b"cm" if n.len() == 6 => gs.ctm = mul([n[0], n[1], n[2], n[3], n[4], n[5]], gs.ctm),
             b"g" | b"rg" | b"k" => {
-                gs.color_space = None;
-                gs.color = Some(op.range);
+                gs.space = match op.op.as_slice() {
+                    b"g" => Space::Gray,
+                    b"rg" => Space::Rgb,
+                    _ => Space::Cmyk,
+                };
+                gs.color = Some((op.range, n.len(), false));
             }
             b"cs" => {
-                gs.color_space = Some(op.range);
+                gs.space = match op.operands.first() {
+                    Some(Operand::Name(name)) if name == b"DeviceGray" => Space::Gray,
+                    Some(Operand::Name(name)) if name == b"DeviceRGB" => Space::Rgb,
+                    Some(Operand::Name(name)) if name == b"DeviceCMYK" => Space::Cmyk,
+                    _ => Space::Named(op.range),
+                };
                 gs.color = None;
             }
-            b"sc" | b"scn" => gs.color = Some(op.range),
+            b"sc" | b"scn" => {
+                // Alleen getallen tellen; bij een patroon (`/P0 scn`) bepaalt de benoemde ruimte het.
+                let numeric = op.operands.iter().all(|o| matches!(o, Operand::Num(_)));
+                gs.color = Some((op.range, if numeric { n.len() } else { 0 }, true));
+            }
             b"BT" => {
                 tm = IDENTITY;
                 tlm = IDENTITY;
@@ -715,11 +789,7 @@ fn analyse(doc: &Document, pid: ObjectId, data: &[u8]) -> Analysis {
         if !visible || !font.reliable || !finite || size.abs() < 0.01 || h_scale.abs() < 0.001 {
             continue;
         }
-        let mut color = Vec::new();
-        for range in [gs.color_space, gs.color].into_iter().flatten() {
-            color.extend_from_slice(&data[range.0..range.1]);
-            color.push(b' ');
-        }
+        let color = fill_color(data, gs.space, gs.color);
         fragments.push(Fragment {
             range: op.range,
             prefix,
@@ -1072,4 +1142,54 @@ pub fn replace_line(doc: &mut Document, page_index: usize, line: &TextLine, new_
     content.extend_from_slice(b" Tj ET");
     overlay(doc, pid, content, font, None, false)?;
     Ok(Replaced::SubstituteFont)
+}
+
+/// Begin van elke tekst die een eerdere versie van Perkament als vervanging tekende.
+const OVERLAY_SIGNATURE: &[u8] = b"Q q 1 0 0 1 0.000 0.000 cm\n";
+
+/// Herstelt vervangende tekst van eerdere Perkament-versies. Die nam alleen de
+/// kleur (`0 0 0 sc`) over en niet de kleurruimte; Acrobat tekent die tekst dan
+/// niet. Geeft het aantal herstelde streams terug.
+pub fn repair_overlay_colors(doc: &mut Document) -> usize {
+    let mut ids: Vec<ObjectId> = page_ids(doc).into_iter().flat_map(|pid| doc.get_page_contents(pid)).collect();
+    ids.sort();
+    ids.dedup();
+    let mut fixed = 0;
+    for id in ids {
+        let Ok(Object::Stream(stream)) = doc.get_object(id) else { continue };
+        let data = if stream.dict.has(b"Filter") {
+            match stream.decompressed_content() {
+                Ok(data) => data,
+                Err(_) => continue,
+            }
+        } else {
+            stream.content.clone()
+        };
+        let Some(rest) = data.strip_prefix(OVERLAY_SIGNATURE) else { continue };
+        // Alleen het herkenbare foute begin: direct een `sc`/`scn` met alleen getallen.
+        let Some(first) = parse(rest).into_iter().next() else { continue };
+        let numeric = first.operands.iter().all(|o| matches!(o, Operand::Num(_)));
+        if !(first.op == b"sc" || first.op == b"scn") || !numeric || first.range.0 != 0 {
+            continue;
+        }
+        let name: &[u8] = match first.operands.len() {
+            1 => b"/DeviceGray",
+            3 => b"/DeviceRGB",
+            4 => b"/DeviceCMYK",
+            _ => continue,
+        };
+        let mut content = OVERLAY_SIGNATURE.to_vec();
+        content.extend_from_slice(name);
+        content.extend_from_slice(b" cs ");
+        content.extend_from_slice(rest);
+        let mut dict = stream.dict.clone();
+        for key in [b"Filter".as_slice(), b"DecodeParms", b"Length"] {
+            dict.remove(key);
+        }
+        let mut repaired = Stream::new(dict, content);
+        let _ = repaired.compress();
+        doc.objects.insert(id, Object::Stream(repaired));
+        fixed += 1;
+    }
+    fixed
 }

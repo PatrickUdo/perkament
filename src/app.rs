@@ -271,11 +271,14 @@ impl PerkamentApp {
             .map_err(|e| anyhow::anyhow!("{}", tf("err.read_file", &[("e", &e.to_string())])))
             .and_then(|bytes| pdfops::load(&bytes));
         match loaded {
-            Ok(pdf) => {
+            Ok(mut pdf) => {
+                // Bestanden met een fout van een eerdere Perkament-versie meteen herstellen;
+                // het document telt dan als gewijzigd, zodat opslaan het herstel vastlegt.
+                let repaired = textedit::repair_overlay_colors(&mut pdf) > 0;
                 self.doc = Some(Doc {
                     pdf,
                     path: Some(path.to_path_buf()),
-                    saved_at: Some(0),
+                    saved_at: if repaired { None } else { Some(0) },
                     undo_limit: (UNDO_BUDGET / size).clamp(3, 30),
                     undo: Vec::new(),
                     redo: Vec::new(),
@@ -296,7 +299,11 @@ impl PerkamentApp {
                 self.fit_width = true;
                 self.scroll_to = Some(0);
                 self.reload();
-                self.status = tf("st.opened", &[("path", &path.display().to_string())]);
+                self.status = if repaired {
+                    t("st.repaired").to_string()
+                } else {
+                    tf("st.opened", &[("path", &path.display().to_string())])
+                };
             }
             Err(e) => self.error(format!("{}: {e:#}", path.display())),
         }

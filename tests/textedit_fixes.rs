@@ -228,3 +228,64 @@ fn stale_line_is_refused() {
     replace(&mut doc, 0, "Een", "Twee").unwrap();
     assert!(textedit::replace_line(&mut doc, 0, &stale, "x").is_err());
 }
+
+/// Zoals Crystal Reports (SAP): kleurruimte via `rg`, daarna kleuren met `sc`.
+const CRYSTAL: &[u8] = b"1 0 0 1 0 842 cm 0 0 0 rg 0 0 0 RG BT 1 0 0 1 400 -300 Tm 0 0.627 0.933 sc /F1 9 Tf (Subtotal) Tj 100 0 Td 0 0 0 sc /FS 9 Tf (2.920,00) Tj ET";
+
+/// Kleuroperaties met het aantal getallen dat de kleurruimte verwacht, zoals poppler en Acrobat controleren.
+fn color_ops_valid(content: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(content);
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let mut space = 1;
+    for (i, token) in tokens.iter().enumerate() {
+        match *token {
+            "g" => space = 1,
+            "rg" => space = 3,
+            "k" => space = 4,
+            "cs" => space = match tokens[i - 1] { "/DeviceRGB" => 3, "/DeviceCMYK" => 4, "/DeviceGray" => 1, _ => 0 },
+            "sc" if space > 0 => {
+                let args = tokens[..i].iter().rev().take_while(|t| t.parse::<f32>().is_ok()).count();
+                if args != space {
+                    return false;
+                }
+            }
+            "q" | "Q" => {}
+            _ => {}
+        }
+        // Een nieuwe stream (na Q q van een overlay) begint niet met de kleur van de vorige.
+        if *token == "Q" && tokens.get(i + 1) == Some(&"q") {
+            space = 1;
+        }
+    }
+    true
+}
+
+#[test]
+fn substitute_text_keeps_a_colour_space_set_by_rg() {
+    let mut doc = build(&[CRYSTAL]);
+    assert_eq!(replace(&mut doc, 0, "2.920,00", "$ 2.920,00").unwrap(), Replaced::SubstituteFont);
+    let pid = page(&doc, 0);
+    let overlay = doc.get_page_contents(pid).last().copied().unwrap();
+    let Object::Stream(s) = doc.get_object(overlay).unwrap() else { panic!() };
+    let data = s.decompressed_content().unwrap_or_else(|_| s.content.clone());
+    assert!(has(&data, b"/DeviceRGB cs 0 0 0 sc BT"), "{}", String::from_utf8_lossy(&data));
+    assert!(color_ops_valid(&data), "{}", String::from_utf8_lossy(&data));
+}
+
+#[test]
+fn files_from_earlier_versions_are_repaired_once() {
+    let mut doc = build(&[b"0 0 0 rg BT /F1 12 Tf 72 700 Td (x) Tj ET"]);
+    let pid = page(&doc, 0);
+    // Zo schreef een eerdere versie de vervangende tekst weg: kleur zonder kleurruimte.
+    let old = doc.add_object(Stream::new(dictionary! {}, b"Q q 1 0 0 1 0.000 0.000 cm\n0 0 0 sc BT 9 0 0 9 500 380 Tm /F1 1 Tf ($ 0,00) Tj ET\nQ".to_vec()));
+    let mut contents: Vec<Object> = doc.get_page_contents(pid).into_iter().map(Object::Reference).collect();
+    contents.push(Object::Reference(old));
+    doc.get_dictionary_mut(pid).unwrap().set("Contents", contents);
+
+    assert_eq!(textedit::repair_overlay_colors(&mut doc), 1);
+    let Object::Stream(s) = doc.get_object(old).unwrap() else { panic!() };
+    let data = s.decompressed_content().unwrap_or_else(|_| s.content.clone());
+    assert!(data.starts_with(b"Q q 1 0 0 1 0.000 0.000 cm\n/DeviceRGB cs 0 0 0 sc BT"), "{}", String::from_utf8_lossy(&data));
+    // Een tweede keer, en gewone inhoud, blijven onaangeroerd.
+    assert_eq!(textedit::repair_overlay_colors(&mut doc), 0);
+}
