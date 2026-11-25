@@ -2872,6 +2872,7 @@ dependencies = [
  "sys-locale",
  "ureq",
  "winit",
+ "zip",
 ]
 
 [[package]]

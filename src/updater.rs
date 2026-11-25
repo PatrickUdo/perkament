@@ -160,6 +160,15 @@ fn install_target() -> Result<PathBuf, String> {
     }
 }
 
+/// Haalt één bestand uit een zip-archief en schrijft het naar `dest`.
+fn extract_file(archive: &[u8], name: &str, dest: &Path) -> Result<(), String> {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).map_err(|_| t("upd.bad_archive").to_string())?;
+    let mut entry = zip.by_name(name).map_err(|_| t("upd.bad_archive").to_string())?;
+    let mut file = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+    std::io::copy(&mut entry, &mut file).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())
+}
+
 /// Pakt het releasebestand uit en zet de nieuwe versie op de plaats van de oude.
 fn replace(archive: &[u8]) -> Result<(), String> {
     let target = install_target()?;
@@ -177,12 +186,11 @@ fn replace(archive: &[u8]) -> Result<(), String> {
             run(Command::new("/usr/bin/ditto").args(["-x", "-k"]).arg(&packed).arg(&out))?;
             out.join("Perkament.app")
         } else if cfg!(windows) {
-            run(Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command"]).arg(format!(
-                "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
-                packed.display(),
-                out.display()
-            )))?;
-            out.join("perkament.exe")
+            // Zelf uitpakken: PowerShell's Expand-Archive kan niet met paden als
+            // \\?\C:\..., en dat is wat canonicalize() op Windows teruggeeft.
+            let fresh = out.join("perkament.exe");
+            extract_file(archive, "perkament.exe", &fresh)?;
+            fresh
         } else {
             run(Command::new("tar").arg("-xzf").arg(&packed).arg("-C").arg(&out))?;
             out.join("perkament")
@@ -282,6 +290,27 @@ mod tests {
     // Wegwerpsleutel, alleen voor deze test, met een handtekening over b"test".
     const TEST_KEY: &str = "RWSOMHFVI1sG+E/scHyAwrS5RpUZgAQOl64OpXlX4Vco70OQvqsSyUf4";
     const TEST_SIG: &str = "untrusted comment: signature from minisign secret key\nRUSOMHFVI1sG+NYHvn8SMqFcbjQYoiCfpH+Guccm5RWZqCCxOdwBPYN3gJHot5TlS5qBceBUvETmjRMgLhpo1Q9ik8+MpGmaCw4=\ntrusted comment: timestamp:1794312222\tfile:msg\thashed\naIXxhoRgcRFOnq3eZ9WF+VMQPUz9FyzMLNzgXcEoL6Nx71M39WGY53yEEy5ahn3z2RKmmZsKsVaT7ypip93fDw==\n";
+
+    #[test]
+    fn extracts_the_program_from_the_release_zip() {
+        use std::io::Write;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(&mut buf);
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file("perkament.exe", options).unwrap();
+        writer.write_all(&b"MZ fake program ".repeat(1000)).unwrap();
+        writer.finish().unwrap();
+        let archive = buf.into_inner();
+
+        let dir = std::env::temp_dir().join(format!("perkament-extract-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("perkament.exe");
+        extract_file(&archive, "perkament.exe", &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"MZ fake program ".repeat(1000));
+        assert!(extract_file(&archive, "anders.exe", &dir.join("x")).is_err());
+        assert!(extract_file(b"geen zip", "perkament.exe", &dir.join("y")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn build_numbers() {
