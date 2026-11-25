@@ -8,7 +8,7 @@
 use crate::i18n::{t, tf};
 use anyhow::{anyhow, bail, Context, Result};
 use lopdf::{dictionary, Dictionary, Document, Object, ObjectId, Stream, StringFormat};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub const APP_NAME: &str = "Perkament";
 
@@ -17,7 +17,11 @@ pub const APP_NAME: &str = "Perkament";
 // ---------------------------------------------------------------------------
 
 pub fn load(bytes: &[u8]) -> Result<Document> {
-    let mut doc = Document::load_mem(bytes).context(t("err.pdf_read"))?;
+    let options = lopdf::LoadOptions { max_decompressed_size: Some(MAX_STREAM_BYTES as usize), ..Default::default() };
+    // Een paniek in de parser (kwaadaardig bestand) wordt een foutmelding, geen crash.
+    let mut doc = guarded(|| Document::load_mem_with_options(bytes, options))
+        .ok_or_else(|| anyhow!(t("err.pdf_read")))?
+        .context(t("err.pdf_read"))?;
     if doc.is_encrypted() {
         doc.decrypt("")
             .map_err(|_| anyhow!(t("err.password")))?;
@@ -45,6 +49,188 @@ pub fn to_bytes_for_saving(doc: &Document) -> Result<Vec<u8>> {
     copy.prune_objects();
     copy.compress();
     to_bytes(&mut copy)
+}
+
+// ---------------------------------------------------------------------------
+// Bescherming tegen kwaadaardige bestanden
+// ---------------------------------------------------------------------------
+
+/// Voert `f` uit en vangt een paniek op (die wel in het logboek komt).
+pub fn guarded<T>(f: impl FnOnce() -> T) -> Option<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
+}
+
+/// Meer dan dit aan uitgepakte bytes in één stream geldt als decompressiebom.
+pub const MAX_STREAM_BYTES: u64 = 128 * 1024 * 1024;
+/// Afbeeldingen groter dan dit (100 megapixel) tekent de renderer niet.
+pub const MAX_IMAGE_PIXELS: u64 = 100_000_000;
+/// Grens voor het uitpakken van paginainhoud door onze eigen code (tekst, zoeken, Excel).
+pub const MAX_CONTENT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Uitkomsten van [`stream_is_unsafe`] per object, met de ruwe lengte als controle
+/// dat de stream sindsdien niet is veranderd.
+pub type StreamChecks = HashMap<ObjectId, (usize, bool)>;
+
+/// Telt de uitgepakte grootte van zlib- of kale deflate-data, zonder die vast te houden.
+/// Geeft `None` als de data na `limit` bytes nog doorgaat.
+fn inflated_size(data: &[u8], limit: u64) -> Option<u64> {
+    use std::io::Read;
+    let count = |reader: &mut dyn Read| std::io::copy(&mut reader.take(limit + 1), &mut std::io::sink());
+    let zlib = count(&mut flate2::read::ZlibDecoder::new(data));
+    let raw = count(&mut flate2::read::DeflateDecoder::new(data));
+    // Een renderer probeert bij een fout vaak de andere variant: de grootste telt.
+    let size = zlib.unwrap_or(0).max(raw.unwrap_or(0));
+    (size <= limit).then_some(size)
+}
+
+/// Afmetingen uit de SOF-marker van een JPEG, zoals een decoder die zou gebruiken.
+fn jpeg_size(data: &[u8]) -> Option<(u64, u64)> {
+    let mut i = 2;
+    while i + 9 < data.len() {
+        if data[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = data[i + 1];
+        if matches!(marker, 0xC0..=0xCF) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+            let h = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u64;
+            let w = u16::from_be_bytes([data[i + 7], data[i + 8]]) as u64;
+            return Some((w, h));
+        }
+        if matches!(marker, 0xD8 | 0x01 | 0xD0..=0xD7 | 0xFF) {
+            i += if marker == 0xFF { 1 } else { 2 };
+            continue;
+        }
+        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+        i += 2 + len.max(2);
+    }
+    None
+}
+
+fn filter_names(stream: &Stream) -> Vec<Vec<u8>> {
+    match stream.dict.get(b"Filter") {
+        Ok(Object::Name(n)) => vec![n.clone()],
+        Ok(Object::Array(a)) => a.iter().filter_map(|o| o.as_name().ok().map(<[u8]>::to_vec)).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Zou deze stream bij het tekenen onredelijk veel geheugen vragen?
+pub fn stream_is_unsafe(doc: &Document, stream: &Stream) -> bool {
+    let int = |key: &[u8]| {
+        let obj = stream.dict.get(key).ok()?;
+        let obj = match obj {
+            Object::Reference(id) => doc.get_object(*id).ok()?,
+            other => other,
+        };
+        obj.as_i64().ok()
+    };
+    let filters = filter_names(stream);
+    if stream.dict.get(b"Subtype").and_then(Object::as_name).is_ok_and(|n| n == b"Image") {
+        let (w, h) = (int(b"Width").unwrap_or(0), int(b"Height").unwrap_or(0));
+        if w < 0 || h < 0 || (w as u64).saturating_mul(h as u64) > MAX_IMAGE_PIXELS {
+            return true;
+        }
+        if filters.iter().any(|f| f == b"DCTDecode") {
+            // Het uitgepakte voorgaande filter is klein genoeg (zie hieronder); de JPEG zelf
+            // kan andere afmetingen opgeven dan het woordenboek.
+            let jpeg = if filters.len() == 1 { Some(stream.content.clone()) } else { stream.decompressed_content_with_limit(MAX_STREAM_BYTES as usize).ok() };
+            if let Some((w, h)) = jpeg.as_deref().and_then(jpeg_size) {
+                if w.saturating_mul(h) > MAX_IMAGE_PIXELS {
+                    return true;
+                }
+            }
+        }
+    }
+    match filters.as_slice() {
+        [] => stream.content.len() as u64 > MAX_STREAM_BYTES,
+        [f] if f == b"FlateDecode" || f == b"Fl" => inflated_size(&stream.content, MAX_STREAM_BYTES).is_none(),
+        _ => {
+            // Ketens en andere filters: lopdf pakt begrensd uit. Filters die lopdf niet
+            // kent (beeldformaten) laten het niet groter worden dan de ruwe data.
+            match stream.decompressed_content_with_limit(MAX_STREAM_BYTES as usize) {
+                Ok(_) => false,
+                Err(e) => matches!(e, lopdf::Error::Decompress(lopdf::DecompressError::MemoryLimitExceeded { .. }) | lopdf::Error::Decompress(lopdf::DecompressError::TooManyFilters { .. })),
+            }
+        }
+    }
+}
+
+/// Vervangt een te grote stream door een lege (een afbeelding door 1 witte pixel).
+fn neutralize(stream: &mut Stream) {
+    let is_image = stream.dict.get(b"Subtype").and_then(Object::as_name).is_ok_and(|n| n == b"Image");
+    for key in [b"Filter".as_slice(), b"DecodeParms", b"Length", b"SMask", b"Mask", b"Decode", b"DL"] {
+        stream.dict.remove(key);
+    }
+    if is_image {
+        let mask = stream.dict.get(b"ImageMask").and_then(Object::as_bool).unwrap_or(false);
+        stream.dict.set("Width", 1);
+        stream.dict.set("Height", 1);
+        if mask {
+            stream.dict.set("BitsPerComponent", 1);
+        } else {
+            stream.dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+            stream.dict.set("BitsPerComponent", 8);
+        }
+        stream.set_content(vec![0xFF]);
+    } else {
+        stream.set_content(Vec::new());
+    }
+}
+
+/// Serialiseert het document voor de renderer, met te grote streams vervangen door
+/// lege. Het document zelf blijft onveranderd; `checks` onthoudt eerdere controles.
+pub fn to_render_bytes(doc: &mut Document, checks: &mut StreamChecks) -> Result<Vec<u8>> {
+    let mut bad = Vec::new();
+    for (id, obj) in &doc.objects {
+        let Object::Stream(stream) = obj else { continue };
+        let len = stream.content.len();
+        let unsafe_ = match checks.get(id) {
+            Some(&(checked_len, result)) if checked_len == len => result,
+            _ => {
+                let result = stream_is_unsafe(doc, stream);
+                checks.insert(*id, (len, result));
+                result
+            }
+        };
+        if unsafe_ {
+            bad.push(*id);
+        }
+    }
+    if bad.is_empty() {
+        return to_bytes(doc);
+    }
+    let mut copy = doc.clone();
+    for id in bad {
+        if let Ok(Object::Stream(stream)) = copy.get_object_mut(id) {
+            neutralize(stream);
+        }
+    }
+    to_bytes(&mut copy)
+}
+
+/// Past de stream uitgepakt binnen [`MAX_CONTENT_BYTES`]? Telt bij Flate zonder de
+/// data vast te houden, zodat een bom geen geheugen vraagt.
+fn content_fits(stream: &Stream) -> bool {
+    match filter_names(stream).as_slice() {
+        [] => stream.content.len() <= MAX_CONTENT_BYTES,
+        [f] if f == b"FlateDecode" || f == b"Fl" => inflated_size(&stream.content, MAX_CONTENT_BYTES as u64).is_some(),
+        _ => true,
+    }
+}
+
+/// Pakt een stream uit met de grens voor onze eigen verwerking.
+pub fn content_bytes(stream: &Stream) -> Result<Vec<u8>> {
+    if !content_fits(stream) {
+        bail!("stream too large")
+    }
+    if stream.dict.has(b"Filter") {
+        stream.decompressed_content_with_limit(MAX_CONTENT_BYTES).map_err(|e| anyhow!("{e}"))
+    } else if stream.content.len() > MAX_CONTENT_BYTES {
+        bail!("stream too large")
+    } else {
+        Ok(stream.content.clone())
+    }
 }
 
 /// Verwijst `obj` naar een pagina die niet meer in het document zit, of is het
@@ -627,7 +813,19 @@ fn wrap_text(text: &str, size: f32, max_width: f32) -> Vec<String> {
 }
 
 pub fn page_text(doc: &Document, index: usize) -> String {
-    doc.extract_text(&[index as u32 + 1]).unwrap_or_default()
+    // lopdf bewaart bij elke `q` een kopie van de toestand; bij absurd diepe nesting
+    // (alleen in kwaadaardige bestanden) gebruiken we onze eigen, begrensde tekstlezer.
+    // Te grote pagina's slaan we over; bij absurd diepe `q`-nesting (alleen in
+    // kwaadaardige bestanden) gebruiken we onze eigen lezer, die daar zuinig mee is.
+    match crate::textedit::complexity(doc, index) {
+        crate::textedit::Complexity::TooLarge => return String::new(),
+        crate::textedit::Complexity::DeepNesting => {
+            let lines = crate::textedit::text_lines(doc, index).unwrap_or_default();
+            return lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n");
+        }
+        crate::textedit::Complexity::Normal => {}
+    }
+    guarded(|| doc.extract_text_with_limit(&[index as u32 + 1], MAX_CONTENT_BYTES).unwrap_or_default()).unwrap_or_default()
 }
 
 #[derive(Clone, Debug)]

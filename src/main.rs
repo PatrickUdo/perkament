@@ -155,7 +155,7 @@ fn render_cli(args: &[String]) -> Result<(), String> {
     let scale: f32 = rest.first().and_then(|s| s.parse().ok()).unwrap_or(2.0);
     let bytes = std::fs::read(input).map_err(|e| e.to_string())?;
     let mut doc = pdfops::load(&bytes).map_err(|e| e.to_string())?;
-    let bytes = pdfops::to_bytes(&mut doc).map_err(|e| e.to_string())?;
+    let bytes = pdfops::to_render_bytes(&mut doc, &mut Default::default()).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
     for page in 0..pdfops::page_count(&doc) {
         let png = render::render_png(bytes.clone(), page, scale)?;

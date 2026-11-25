@@ -22,6 +22,8 @@ type Range = (usize, usize);
 const IDENTITY: Matrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 /// Fragmenten verder uit elkaar dan dit (in em) horen niet bij dezelfde regel.
 const MAX_GAP_EM: f32 = 0.8;
+/// Hoe diep `q` genest bewaard wordt (Acrobat houdt het op 28).
+const MAX_SAVE_DEPTH: usize = 256;
 const DEFAULT_SPACE: f32 = 280.0;
 
 /// `a × b` in PDF-notatie: eerst `a` toepassen, dan `b`.
@@ -643,6 +645,7 @@ fn analyse(doc: &Document, pid: ObjectId, data: &[u8]) -> Analysis {
 
     let mut fragments: Vec<Fragment> = Vec::new();
     let mut stack: Vec<State> = Vec::new();
+    let mut overflow = 0usize;
     let mut gs = State {
         ctm: IDENTITY,
         space: Space::Default,
@@ -663,7 +666,11 @@ fn analyse(doc: &Document, pid: ObjectId, data: &[u8]) -> Analysis {
         let mut show: Option<&Operand> = None;
         let mut prefix: Vec<u8> = Vec::new();
         match op.op.as_slice() {
-            b"q" => stack.push(gs.clone()),
+            // Dieper dan MAX_SAVE_DEPTH wordt alleen geteld, niet bewaard: een bestand met
+            // honderdduizenden `q`'s zou anders evenveel kopieën van de toestand vragen.
+            b"q" if stack.len() < MAX_SAVE_DEPTH => stack.push(gs.clone()),
+            b"q" => overflow += 1,
+            b"Q" if overflow > 0 => overflow -= 1,
             b"Q" => {
                 if let Some(saved) = stack.pop() {
                     gs = saved;
@@ -886,16 +893,15 @@ fn page_content(doc: &Document, pid: ObjectId) -> Result<(Vec<u8>, Vec<Segment>)
     let mut segments = Vec::new();
     for id in doc.get_page_contents(pid) {
         let Ok(Object::Stream(stream)) = doc.get_object(id) else { continue };
-        let bytes = if stream.dict.has(b"Filter") {
-            stream.decompressed_content().map_err(|_| anyhow!(t("err.content_read")))?
-        } else {
-            stream.content.clone()
-        };
+        let bytes = crate::pdfops::content_bytes(stream).map_err(|_| anyhow!(t("err.content_read")))?;
         let start = data.len();
         data.extend_from_slice(&bytes);
         segments.push(Segment { id, range: (start, data.len()) });
         // Streams worden als losse tokens aaneengeregen: een scheiding ertussen.
         data.push(b'\n');
+    }
+    if scan(&data).0 > MAX_TOKENS {
+        bail!(t("err.content_read"));
     }
     Ok((data, segments))
 }
@@ -910,10 +916,95 @@ fn public_line(line: &Line) -> TextLine {
 ///
 /// Tekst in ingesloten formulieren (Form XObjects), onzichtbare tekst en tekst
 /// in lettertypen waarvan de codering niet betrouwbaar te lezen is vallen hier buiten.
+/// Meer tokens dan dit op één pagina verwerken we niet (tekst, zoeken, Excel): elke
+/// operator kost geheugen, en zoveel komt alleen in kwaadaardige bestanden voor.
+pub const MAX_TOKENS: usize = 1_000_000;
+
+/// Telt tokens en de diepste `q`-nesting zonder iets op te slaan. Strings en
+/// commentaar tellen als één token; het is een ruwe, veilige bovengrens.
+fn scan(data: &[u8]) -> (usize, usize) {
+    let (mut tokens, mut depth, mut max) = (0usize, 0usize, 0usize);
+    let mut i = 0;
+    while i < data.len() {
+        let b = data[i];
+        if is_space(b) {
+            i += 1;
+            continue;
+        }
+        tokens += 1;
+        match b {
+            b'(' => {
+                let mut level = 0usize;
+                while i < data.len() {
+                    match data[i] {
+                        b'\\' => i += 1,
+                        b'(' => level += 1,
+                        b')' => {
+                            level -= 1;
+                            if level == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'%' => {
+                while i < data.len() && data[i] != b'\n' && data[i] != b'\r' {
+                    i += 1;
+                }
+            }
+            b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' => i += 1,
+            _ => {
+                let begin = i;
+                while i < data.len() && !is_space(data[i]) && !b"()<>[]{}/%".contains(&data[i]) {
+                    i += 1;
+                }
+                // Een losse `)` buiten een string: overslaan, anders staat de scan stil.
+                if i == begin {
+                    i += 1;
+                    continue;
+                }
+                match &data[begin..i] {
+                    b"q" => {
+                        depth += 1;
+                        max = max.max(depth);
+                    }
+                    b"Q" => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+        }
+    }
+    (tokens, max)
+}
+
+/// Hoe een pagina zich verhoudt tot onze grenzen, zonder de inhoud te ontleden.
+pub enum Complexity {
+    Normal,
+    /// Diep geneste `q`: lopdf bewaart bij elke `q` een kopie, onze eigen lezer niet.
+    DeepNesting,
+    /// Te groot of te veel tokens: tekst van deze pagina wordt niet gelezen.
+    TooLarge,
+}
+
+pub fn complexity(doc: &Document, page_index: usize) -> Complexity {
+    let Ok(pid) = page_id(doc, page_index) else { return Complexity::TooLarge };
+    let Ok((data, _)) = page_content(doc, pid) else { return Complexity::TooLarge };
+    match scan(&data) {
+        (tokens, _) if tokens > MAX_TOKENS => Complexity::TooLarge,
+        (_, depth) if depth > MAX_SAVE_DEPTH => Complexity::DeepNesting,
+        _ => Complexity::Normal,
+    }
+}
+
 pub fn text_lines(doc: &Document, page_index: usize) -> Result<Vec<TextLine>> {
     let pid = page_id(doc, page_index)?;
     let (data, _) = page_content(doc, pid)?;
-    Ok(analyse(doc, pid, &data).lines.iter().map(public_line).collect())
+    crate::pdfops::guarded(|| analyse(doc, pid, &data).lines.iter().map(public_line).collect())
+        .ok_or_else(|| anyhow!(t("err.content_read")))
 }
 
 fn standard_font(original: &str) -> Dictionary {
@@ -1109,11 +1200,21 @@ pub fn replace_line(doc: &mut Document, page_index: usize, line: &TextLine, new_
     let mut ids: Vec<ObjectId> = segments.iter().map(|s| s.id).collect();
     for (index, mut list) in per_stream {
         let segment = &segments[index];
-        let mut content = data[segment.range.0..segment.range.1].to_vec();
-        list.sort_by_key(|(range, _)| std::cmp::Reverse(range.0));
+        // In één doorgang opbouwen: per bewerking `splice` schuift telkens de hele rest
+        // op en wordt kwadratisch bij een regel van miljoenen fragmenten.
+        let original = &data[segment.range.0..segment.range.1];
+        list.sort_by_key(|(range, _)| range.0);
+        let mut content = Vec::with_capacity(original.len());
+        let mut pos = 0;
         for ((start, end), bytes) in list {
-            content.splice(start..end, bytes);
+            if start < pos {
+                bail!(t("err.text_pos"));
+            }
+            content.extend_from_slice(&original[pos..start]);
+            content.extend_from_slice(&bytes);
+            pos = end;
         }
+        content.extend_from_slice(&original[pos..]);
         let Ok(Object::Stream(old)) = doc.get_object(segment.id) else { bail!(t("err.text_pos")) };
         let mut dict = old.dict.clone();
         for key in [b"Filter".as_slice(), b"DecodeParms", b"Length"] {
@@ -1157,17 +1258,10 @@ pub fn repair_overlay_colors(doc: &mut Document) -> usize {
     let mut fixed = 0;
     for id in ids {
         let Ok(Object::Stream(stream)) = doc.get_object(id) else { continue };
-        let data = if stream.dict.has(b"Filter") {
-            match stream.decompressed_content() {
-                Ok(data) => data,
-                Err(_) => continue,
-            }
-        } else {
-            stream.content.clone()
-        };
+        let Ok(data) = crate::pdfops::content_bytes(stream) else { continue };
         let Some(rest) = data.strip_prefix(OVERLAY_SIGNATURE) else { continue };
         // Alleen het herkenbare foute begin: direct een `sc`/`scn` met alleen getallen.
-        let Some(first) = parse(rest).into_iter().next() else { continue };
+        let Some(first) = parse(&rest[..rest.len().min(256)]).into_iter().next() else { continue };
         let numeric = first.operands.iter().all(|o| matches!(o, Operand::Num(_)));
         if !(first.op == b"sc" || first.op == b"scn") || !numeric || first.range.0 != 0 {
             continue;

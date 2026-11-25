@@ -2862,6 +2862,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "eframe",
+ "flate2",
  "hayro",
  "image",
  "lopdf",

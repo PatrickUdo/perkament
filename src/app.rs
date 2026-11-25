@@ -67,6 +67,8 @@ struct Doc {
     texts: Option<Vec<String>>,
     /// Bewerkbare tekstregels per pagina (lui berekend).
     lines: HashMap<usize, Vec<TextLine>>,
+    /// Welke streams te groot zijn om te tekenen (zie `pdfops::to_render_bytes`).
+    checks: pdfops::StreamChecks,
 }
 
 impl Doc {
@@ -293,6 +295,7 @@ impl PerkamentApp {
                     annots: Vec::new(),
                     texts: None,
                     lines: HashMap::new(),
+                    checks: pdfops::StreamChecks::new(),
                 });
                 self.hits.clear();
                 self.searched = false;
@@ -325,7 +328,7 @@ impl PerkamentApp {
         doc.annots = pdfops::list_annotations(&doc.pdf);
         self.hits.clear();
         self.searched = false;
-        match pdfops::to_bytes(&mut doc.pdf) {
+        match pdfops::to_render_bytes(&mut doc.pdf, &mut doc.checks) {
             Ok(bytes) => {
                 self.renderer.load(doc.generation, bytes);
             }
@@ -588,7 +591,7 @@ impl PerkamentApp {
                 else {
                     return;
                 };
-                let result = pdfops::to_bytes(&mut doc.pdf)
+                let result = pdfops::to_render_bytes(&mut doc.pdf, &mut doc.checks)
                     .and_then(|bytes| {
                         render::render_png_with_timeout(bytes, page, 2.0, RENDER_TIMEOUT).map_err(anyhow::Error::msg)
                     })
